@@ -302,6 +302,28 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
   m.impl("_copy_from", &custom__copy_from);
 }
 
+at::Tensor furiosa_cpu_task(const at::Tensor &a, const at::Tensor &b)
+{
+  // dummy impl
+  const at::OptionalDeviceGuard device_guard(at::device_of(a));
+  std::cout << "Custom furiosa::cpu_task() called!" << std::endl;
+  return at::empty(a.sizes(), a.options());
+}
+
+at::Tensor furiosa_npu_task(const at::Tensor &a, const at::Tensor &b)
+{
+  // dummy impl
+  const at::OptionalDeviceGuard device_guard(at::device_of(b));
+  std::cout << "Custom furiosa::npu_task() called!" << std::endl;
+  return at::empty(b.sizes(), b.options());
+}
+
+TORCH_LIBRARY(furiosa, m)
+{
+  m.def("cpu_task(Tensor a, Tensor b) -> Tensor", &furiosa_cpu_task);
+  m.def("npu_task(Tensor a, Tensor b) -> Tensor", &furiosa_npu_task);
+}
+
 // This basic implementation doesn't bother dealing with different device indices
 // (e.g. custom_device:0 vs. custom_device:1).
 // We could do that by letting the user pass in a device index in our exposed device function.
