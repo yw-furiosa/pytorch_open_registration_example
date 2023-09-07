@@ -2,11 +2,13 @@
 #include <c10/core/Allocator.h>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
+#include <c10/core/DispatchKeySet.h>
 
 #include <torch/csrc/Device.h>
 #include <torch/extension.h>
 
 #include <ATen/native/cpu/Loops.h>
+#include <ATen/native/CPUFallback.h>
 #include <ATen/native/DispatchStub.h>
 #include <ATen/EmptyTensor.h>
 
@@ -46,8 +48,8 @@ struct DummyCustomAllocator final : at::Allocator
   DummyCustomAllocator() = default;
   at::DataPtr allocate(size_t nbytes) const override
   {
-    std::cout << "Custom allocator's allocate() called!" << std::endl;
     void *data = c10::alloc_cpu(nbytes);
+    std::cout << "Custom allocator's allocate() called! Allocate at [" << data << "]" << std::endl;
     return {data, data, &ReportAndDelete, at::Device(at::DeviceType::PrivateUse1, 0)};
   }
 
@@ -57,7 +59,7 @@ struct DummyCustomAllocator final : at::Allocator
     {
       return;
     }
-    std::cout << "Custom allocator's delete() called!" << std::endl;
+    std::cout << "Custom allocator's delete() called! Free at [" << ptr << "]" << std::endl;
     c10::free_cpu(ptr);
   }
 
@@ -284,6 +286,11 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
   return dst;
 }
 
+at::Tensor custom__copy_from_and_resize(const at::Tensor &self, const at::Tensor &dst)
+{
+  return custom__copy_from(self, dst, false);
+}
+
 // This macro does the heavy lifting.
 // With TORCH_LIBRARY_IMPL, you can register custom kernels for your backend.
 // For open registration, we're registering all of our kernels to the PrivateUse1 dispatch key.
@@ -293,6 +300,19 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
 //
 // This macro registers your kernels to the PyTorch Dispatcher.
 // More details on the dispatcher can be found at http://blog.ezyang.com/2020/09/lets-talk-about-the-pytorch-dispatcher/.
+
+void custom_backend_fallback(const c10::OperatorHandle &op,
+                             c10::DispatchKeySet dispatch_keys,
+                             torch::jit::Stack *stack)
+{
+  at::native::cpu_fallback(op, stack);
+}
+
+TORCH_LIBRARY_IMPL(_, PrivateUse1, m)
+{
+  m.fallback(torch::CppFunction::makeFromBoxedFunction<&custom_backend_fallback>());
+}
+
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
 {
   m.impl("add.Tensor", &custom_add_Tensor);
@@ -300,8 +320,11 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
   m.impl("empty_strided", &custom_empty_strided);
   m.impl("fill_.Scalar", &custom_fill__scalar);
   m.impl("_copy_from", &custom__copy_from);
+  // _copy_from_and_resize CPU kernel is not implemented
+  m.impl("_copy_from_and_resize", &custom__copy_from_and_resize);
 }
 
+// Make `furiosa` namespace and register two custom operators
 at::Tensor furiosa_cpu_task(const at::Tensor &a, const at::Tensor &b)
 {
   // dummy impl
