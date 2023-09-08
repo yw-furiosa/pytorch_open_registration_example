@@ -305,12 +305,26 @@ void custom_backend_fallback(const c10::OperatorHandle &op,
                              c10::DispatchKeySet dispatch_keys,
                              torch::jit::Stack *stack)
 {
+  std::cout << "Custom backend_fallback() called!" << std::endl;
   at::native::cpu_fallback(op, stack);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m)
 {
-  m.fallback(torch::CppFunction::makeFromBoxedFunction<&custom_backend_fallback>());
+  // m.fallback(torch::CppFunction::makeFromBoxedFunction<&custom_backend_fallback>());
+  m.fallback(torch::CppFunction::makeFallthrough());
+}
+
+at::Tensor &wrapper_CPU_sub_out_out(const at::Tensor &self, const at::Tensor &other, const at::Scalar &alpha, at::Tensor &out)
+{
+  std::cout << "Custom wrapper CPU sub out called!" << std::endl;
+  // from build/aten/src/ATen/RegisterCPU.cpp (generated file)
+  // structured_sub_out_out op(out);
+  // op.meta(self, other, alpha);
+  // op.impl(self, other, alpha, op.maybe_get_output(0));
+  // if (op.proxy_outputs_[0].has_value())
+  //   op.outputs_[0].get().copy_(*op.proxy_outputs_[0]);
+  return out;
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
@@ -320,6 +334,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
   m.impl("empty_strided", &custom_empty_strided);
   m.impl("fill_.Scalar", &custom_fill__scalar);
   m.impl("_copy_from", &custom__copy_from);
+  m.impl("sub.out", wrapper_CPU_sub_out_out);
   // _copy_from_and_resize CPU kernel is not implemented
   m.impl("_copy_from_and_resize", &custom__copy_from_and_resize);
 }
