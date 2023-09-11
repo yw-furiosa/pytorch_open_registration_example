@@ -24,7 +24,7 @@
 //     (see DummyDeviceGuard)
 // (3) Writing a custom aten::empty.memory_format function
 
-// basic dummy add function
+// basic dummy add function (not used)
 at::Tensor custom_add_Tensor(const at::Tensor &self, const at::Tensor &other, const at::Scalar &alpha)
 {
   const at::OptionalDeviceGuard device_guard(at::device_of(self));
@@ -261,14 +261,6 @@ at::Tensor custom_empty_strided(at::IntArrayRef size, at::IntArrayRef stride, c1
   return at::detail::empty_strided_generic(size, stride, &global_custom_alloc, private_use_ks, c10::dtype_or_default(dtype));
 }
 
-at::Tensor &custom_fill__scalar(at::Tensor &self, const at::Scalar &value)
-{
-  const at::OptionalDeviceGuard device_guard(at::device_of(self));
-  // Not bothering to implement.
-  // Should fill the tensor's data with "value".
-  return self;
-}
-
 // basic dummy copy_() function, so we can copy from the custom device to/from CPU
 at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool non_blocking)
 {
@@ -301,9 +293,9 @@ at::Tensor custom__copy_from_and_resize(const at::Tensor &self, const at::Tensor
 // This macro registers your kernels to the PyTorch Dispatcher.
 // More details on the dispatcher can be found at http://blog.ezyang.com/2020/09/lets-talk-about-the-pytorch-dispatcher/.
 
-void custom_backend_fallback(const c10::OperatorHandle &op,
-                             c10::DispatchKeySet dispatch_keys,
-                             torch::jit::Stack *stack)
+// Refer XLA https://github.com/pytorch/xla/blob/e51d28b64c1757d62fb46a1263549140a2cb3ca2/torch_xla/csrc/aten_cpu_fallback.cpp#L18
+// or Ascend https://github.com/Ascend/pytorch/blob/e70b14dcbb0ebf362cf2985a59113ee2247df956/torch_npu/csrc/aten/VariableFallbackKernel.cpp#L49
+void custom_backend_fallback(const c10::OperatorHandle &op, torch::jit::Stack *stack)
 {
   std::cout << "Custom backend_fallback() called!" << std::endl;
   at::native::cpu_fallback(op, stack);
@@ -311,30 +303,14 @@ void custom_backend_fallback(const c10::OperatorHandle &op,
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m)
 {
-  // m.fallback(torch::CppFunction::makeFromBoxedFunction<&custom_backend_fallback>());
-  m.fallback(torch::CppFunction::makeFallthrough());
-}
-
-at::Tensor &wrapper_CPU_sub_out_out(const at::Tensor &self, const at::Tensor &other, const at::Scalar &alpha, at::Tensor &out)
-{
-  std::cout << "Custom wrapper CPU sub out called!" << std::endl;
-  // from build/aten/src/ATen/RegisterCPU.cpp (generated file)
-  // structured_sub_out_out op(out);
-  // op.meta(self, other, alpha);
-  // op.impl(self, other, alpha, op.maybe_get_output(0));
-  // if (op.proxy_outputs_[0].has_value())
-  //   op.outputs_[0].get().copy_(*op.proxy_outputs_[0]);
-  return out;
+  m.fallback(torch::CppFunction::makeFromBoxedFunction<&custom_backend_fallback>());
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
 {
-  m.impl("add.Tensor", &custom_add_Tensor);
   m.impl("empty.memory_format", &custom_empty_memory_format);
   m.impl("empty_strided", &custom_empty_strided);
-  m.impl("fill_.Scalar", &custom_fill__scalar);
   m.impl("_copy_from", &custom__copy_from);
-  m.impl("sub.out", wrapper_CPU_sub_out_out);
   // _copy_from_and_resize CPU kernel is not implemented
   m.impl("_copy_from_and_resize", &custom__copy_from_and_resize);
 }
