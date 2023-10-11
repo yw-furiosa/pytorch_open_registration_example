@@ -264,15 +264,17 @@ at::Tensor custom_empty_strided(at::IntArrayRef size, at::IntArrayRef stride, c1
 // basic dummy copy_() function, so we can copy from the custom device to/from CPU
 at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool non_blocking)
 {
+  // TODO: handle Meta tensor for tracing
   const at::OptionalDeviceGuard device_guard(at::device_of(self));
-  std::cout << "Custom aten::_copy_from() called!" << std::endl;
+  std::cout << "Custom aten::_copy_from() called! " << self.device() << " -> " << dst.device() << std::endl;
   TORCH_CHECK(self.is_cpu() || self.device().type() == c10::DeviceType::PrivateUse1, "Dummy test only allows copy from cpu -> dummy device.");
   TORCH_CHECK(dst.is_cpu() || dst.device().type() == c10::DeviceType::PrivateUse1, "Dummy test only allows copy from cpu -> dummy device.");
 
   // Some dummy asserts for the basic use case: inputs are the same size / dtype, all contiguous.
   TORCH_CHECK(self.sizes() == dst.sizes());
   TORCH_CHECK(self.scalar_type() == dst.scalar_type());
-  TORCH_CHECK(self.is_contiguous() && dst.is_contiguous());
+  // turn off this check because of meta tensor
+  // TORCH_CHECK(self.is_contiguous() && dst.is_contiguous());
 
   std::memcpy(dst.storage().data_ptr().get(), self.storage().data_ptr().get(), self.storage().nbytes());
   return dst;
@@ -281,6 +283,17 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
 at::Tensor custom__copy_from_and_resize(const at::Tensor &self, const at::Tensor &dst)
 {
   return custom__copy_from(self, dst, false);
+}
+
+// TODO: is it enough?
+at::Tensor custom__as_strided(
+    const at::Tensor &self,
+    c10::IntArrayRef size,
+    c10::IntArrayRef stride,
+    c10::optional<int64_t> storage_offset_)
+{
+  // copy implementation from build/aten/src/ATen/RegisterCPU.cpp wrapper_CPU__as_strided
+  return at::native::as_strided_tensorimpl(self, size, stride, storage_offset_);
 }
 
 // This macro does the heavy lifting.
@@ -310,7 +323,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
 {
   m.impl("empty.memory_format", &custom_empty_memory_format);
   m.impl("empty_strided", &custom_empty_strided);
+  m.impl("as_strided", &custom__as_strided); // called in at:native::cpu_fallback
   m.impl("_copy_from", &custom__copy_from);
+  // m.impl("convolution_overrideable", &custom_convolution_overrideable);
   // _copy_from_and_resize CPU kernel is not implemented
   m.impl("_copy_from_and_resize", &custom__copy_from_and_resize);
 }
