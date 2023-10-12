@@ -49,19 +49,37 @@ def custom_convolution_overrideable(
 
 
 # schema: at::Tensor view(const at::Tensor& self, c10::IntArrayRef size)
-def custom_view(input, size):
-    output = torch.randn(size).to(input.device)
-    output.storage = input.storage
+def custom_view(self, size):
+    print("Custom aten::view called!")
+    if self.device == torch.device("meta"):
+        # for tracing
+        output = torch.randn(size).to(self.device)
+    else:
+        # for execution
+        # The reason of using as_strided is that as_strided return a tensor which has same storage with input
+        # It makes result can pass the assertion in ADInplaceOrView::view operator which check return tensor has same storage with input
+        # That assertion is at torch/csrc/autograd/generated/VariableType_3.cpp::15467, "AT_ASSERT(self__storage_saved.value().is_alias_of(result.storage()));"
+        stride = [1]
+        for s in reversed(size):
+            stride.insert(0, stride[0] * s)
+        output = self.as_strided(size, stride[1:])
     return output
+
+
+# schema: at::Tensor _reshape_alias(const at::Tensor &self, c10::SymIntArrayRef size, c10::SymIntArrayRef stride)
+def custom__reshape_alias(self, size, stride):
+    print("Custom aten::_reshape_alias called!")
+    return self.as_strided(size, stride)
 
 
 lib = torch.library.Library("aten", "IMPL", "PrivateUse1")
 lib.impl("convolution_overrideable", custom_convolution_overrideable)
 lib.impl("view", custom_view)
+lib.impl("_reshape_alias", custom__reshape_alias)
 
 
 def backend(m, inputs):
-    m = functionalize(m, remove="mutations_and_views")
+    # m = functionalize(m, remove="mutations_and_views")
     m = make_fx(m, tracing_mode="fake", _allow_non_fake_inputs=True)(*inputs)
     # m.print_readable()
     return m
@@ -73,5 +91,5 @@ m.eval()
 m = torch.compile(m, backend=backend)
 
 y = m(x)
-print(y.device)
+print(y.shape)
 print("finish")

@@ -282,17 +282,19 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
 
 at::Tensor custom__copy_from_and_resize(const at::Tensor &self, const at::Tensor &dst)
 {
+  std::cout << "Custom aten::_copy_from_and_resize called!" << std::endl;
   return custom__copy_from(self, dst, false);
 }
 
 // TODO: is it enough?
-at::Tensor custom__as_strided(
+at::Tensor custom_as_strided(
     const at::Tensor &self,
     c10::IntArrayRef size,
     c10::IntArrayRef stride,
     c10::optional<int64_t> storage_offset_)
 {
   // copy implementation from build/aten/src/ATen/RegisterCPU.cpp wrapper_CPU__as_strided
+  std::cout << "Custom aten::as_strided called!" << std::endl;
   return at::native::as_strided_tensorimpl(self, size, stride, storage_offset_);
 }
 
@@ -323,9 +325,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
 {
   m.impl("empty.memory_format", &custom_empty_memory_format);
   m.impl("empty_strided", &custom_empty_strided);
-  m.impl("as_strided", &custom__as_strided); // called in at:native::cpu_fallback
+  m.impl("as_strided", &custom_as_strided);
   m.impl("_copy_from", &custom__copy_from);
-  // m.impl("convolution_overrideable", &custom_convolution_overrideable);
   // _copy_from_and_resize CPU kernel is not implemented
   m.impl("_copy_from_and_resize", &custom__copy_from_and_resize);
 }
