@@ -3,8 +3,8 @@ import torchvision
 import torch.utils.cpp_extension
 import torch._dynamo.config
 import logging
-from torch.fx.experimental.proxy_tensor import make_fx
-from torch.func import functionalize
+import furiosa_torch_impl
+
 
 torch._dynamo.config.log_level = logging.INFO
 torch._dynamo.config.output_code = True
@@ -32,13 +32,13 @@ def custom_convolution_overrideable(
     if origin_device == torch.device("meta"):
         # for tracing
         # cannot copy tensor from meta tensor since they do not have any data
-        print("\tcall convolution with random data for tracing")
+        print("\tcall convolution with random tensor for tracing")
         input = torch.randn(input.size())
         weight = torch.randn(weight.size())
         bias = torch.randn(bias.size()) if bias else None
     else:
-        # for eager mode (act as cpu)
-        print("\tcall convolution with copied data from input data to CPU")
+        # for eager mode (act as execute in cpu)
+        print("\tcall convolution with input tensor for execution")
         input = input.to("cpu")
         weight = weight.to("cpu")
         bias = bias.to("cpu") if bias else None
@@ -57,7 +57,7 @@ def custom_view(self, size):
     else:
         # for execution
         # The reason of using as_strided is that as_strided return a tensor which has same storage with input
-        # It makes result can pass the assertion in ADInplaceOrView::view operator which check return tensor has same storage with input
+        # It makes output tensor can pass the assertion in ADInplaceOrView::view operator which check output tensor has same storage with input tensor
         # That assertion is at torch/csrc/autograd/generated/VariableType_3.cpp::15467, "AT_ASSERT(self__storage_saved.value().is_alias_of(result.storage()));"
         stride = [1]
         for s in reversed(size):
@@ -78,18 +78,14 @@ lib.impl("view", custom_view)
 lib.impl("_reshape_alias", custom__reshape_alias)
 
 
-def backend(m, inputs):
-    # m = functionalize(m, remove="mutations_and_views")
-    m = make_fx(m, tracing_mode="fake", _allow_non_fake_inputs=True)(*inputs)
-    # m.print_readable()
-    return m
-
+backend = furiosa_torch_impl.Warboy(num_calib=1)
 
 m = torchvision.models.resnet18().to("npu")
 x = torch.randn(1, 3, 244, 244).to("npu:0")
 m.eval()
 m = torch.compile(m, backend=backend)
 
+y = m(x)
 y = m(x)
 print(y.shape)
 print("finish")
