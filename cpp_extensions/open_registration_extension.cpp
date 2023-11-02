@@ -49,7 +49,7 @@ struct DummyCustomAllocator final : at::Allocator
   at::DataPtr allocate(size_t nbytes) const override
   {
     void *data = c10::alloc_cpu(nbytes);
-    std::cout << "Custom allocator's allocate() called! Allocate at [" << data << "]" << std::endl;
+    std::cout << "Custom allocator's allocate() called! Allocate " << nbytes << " at [" << data << "]" << std::endl;
     return {data, data, &ReportAndDelete, at::Device(at::DeviceType::PrivateUse1, 0)};
   }
 
@@ -266,27 +266,115 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
 {
   // TODO: handle Meta tensor for tracing
   const at::OptionalDeviceGuard device_guard(at::device_of(self));
-  std::cout << "Custom aten::_copy_from() called! " << self.device() << " -> " << dst.device() << std::endl;
+  std::cout << "Custom aten::_copy_from() called! " << self.storage().data_ptr().get() << "[" << self.device() << "] -> " << dst.storage().data_ptr().get() << "[" << dst.device() << "] " << std::endl;
   TORCH_CHECK(self.is_cpu() || self.device().type() == c10::DeviceType::PrivateUse1, "Dummy test only allows copy from cpu -> dummy device.");
   TORCH_CHECK(dst.is_cpu() || dst.device().type() == c10::DeviceType::PrivateUse1, "Dummy test only allows copy from cpu -> dummy device.");
 
   // Some dummy asserts for the basic use case: inputs are the same size / dtype, all contiguous.
   TORCH_CHECK(self.sizes() == dst.sizes());
-  TORCH_CHECK(self.scalar_type() == dst.scalar_type());
-  // turn off this check because of meta tensor
+  // Turn off this check because of meta tensor (meta tensor has no data so error in this check)
   // TORCH_CHECK(self.is_contiguous() && dst.is_contiguous());
+  // Revmoe this assertion because we implement type conversion
+  // TORCH_CHECK(self.scalar_type() == dst.scalar_type());
 
-  std::memcpy(dst.storage().data_ptr().get(), self.storage().data_ptr().get(), self.storage().nbytes());
+  // Have to set storage_offset properly for indexing tensor
+  // TODO: change to use tensor.set_ by implementing set_.source_Storage_storage_offset
+  auto *dst_ = dst.unsafeGetTensorImpl();
+  dst_->set_sizes_and_strides(self.sizes(), self.strides(), c10::make_optional(self.storage_offset()));
+
+  // Type conversion
+  if (self.scalar_type() != dst.scalar_type())
+  {
+    std::cout << "\tExecute custom type conversion" << std::endl;
+    // refer https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/cpu/CopyKernel.cpp#L244
+    auto iter = at::TensorIteratorConfig()
+                    .add_output(dst)
+                    .add_input(self)
+                    .resize_outputs(false)
+                    .check_all_same_dtype(false)
+                    .check_all_same_device(false) // not sure
+                    .build();
+
+    AT_DISPATCH_ALL_TYPES(self.scalar_type(), "_copy_from", [&]
+                          {
+      using dest_t = scalar_t;
+      AT_DISPATCH_ALL_TYPES(dst.scalar_type(), "_copy_from", [&] {
+        iter.for_each(
+                      [](char** data, const int64_t* strides, int64_t size) {
+                        auto src = reinterpret_cast<const scalar_t*>(data[1]);
+                        auto dst = reinterpret_cast<dest_t*>(data[0]);
+                        at::vec::convert(src, dst, size);
+                      });
+      }); });
+    return dst;
+  }
+
+  // cpu -> npu
+  if (self.is_cpu() && dst.device().type() == c10::DeviceType::PrivateUse1)
+  {
+    std::memcpy(dst.storage().data_ptr().get(), self.storage().data_ptr().get(), self.storage().nbytes());
+  }
+  // npu -> cpu
+  else if (self.device().type() == c10::DeviceType::PrivateUse1 && dst.is_cpu())
+  {
+    at::DataPtr data_ptr = {self.storage().data_ptr().get(), self.storage().data_ptr().get_context(), nullptr, dst.device()};
+    dst.storage().set_data_ptr_noswap(std::move(data_ptr));
+  }
+  // TODO: handle copy from npu to npu (?)
+  // npu:0 -> npu:0
+  // else if (self.device() == dst.device()) {}
+  // npu:0 -> npu:1
+  // else {}
+
+  // Failed at assertion `result.storage().use_count() == 1`
+  // auto p = const_cast<at::Tensor *>(&dst);
+  // *p = at::Tensor(self);
+
   return dst;
 }
 
 at::Tensor custom__copy_from_and_resize(const at::Tensor &self, const at::Tensor &dst)
 {
-  std::cout << "Custom aten::_copy_from_and_resize called!" << std::endl;
+  std::cout << "Custom aten::_copy_from_and_resize() called!" << std::endl;
+  // The reason of handling this case here is because this case usually occurs in cpu_fallback,
+  // and _copy_from_and_resize function is called only in cpu_fallback.
+  if (self.storage().data_ptr().get() == dst.storage().data_ptr().get())
+  {
+    std::cout << "\tSkip _copy_from_and_resize() because they already pointing same data pointer" << std::endl;
+    return dst;
+  }
+
+  // aten::abs operator generate output tensor as size 0 and resize it
+  // Output tensor generated at first (dst) has size 0, but calculated output tensor from cpu_fallback (self) has valid size
+  // So we have to resize dst tensor too before copy
+  if (self.sizes() != dst.sizes() && dst.storage().nbytes() == 0)
+  {
+    std::cout << "\tRealloc dst storage " << dst.sizes() << " to " << self.sizes() << " and before copy" << std::endl;
+    at::DataPtr data_ptr = dst.storage().allocator()->allocate(self.storage().nbytes());
+    dst.storage().set_data_ptr_noswap(std::move(data_ptr));
+    // TODO: change to use tensor.set_ by implementing set_.source_Storage_storage_offset
+    auto *dst_ = dst.unsafeGetTensorImpl();
+    dst_->set_sizes_and_strides(self.sizes(), self.strides(), c10::make_optional(self.storage_offset()));
+  }
+
   return custom__copy_from(self, dst, false);
 }
 
-// TODO: is it enough?
+// TODO: take only requried semenatics from at::native functions
+at::Tensor custom_view(const at::Tensor &self, c10::IntArrayRef size)
+{
+  std::cout << "Custom aten::vew() called!" << std::endl;
+  return at::native::view(self, size);
+}
+
+// TODO: take only requried semenatics from at::native functions
+at::Tensor custom__reshape_alias(const at::Tensor &self, c10::IntArrayRef size, c10::IntArrayRef stride)
+{
+  std::cout << "Custom aten::_reshape_alias() called!" << std::endl;
+  return at::native::_reshape_alias(self, size, stride);
+}
+
+// TODO: take only requried semenatics from at::native functions
 at::Tensor custom_as_strided(
     const at::Tensor &self,
     c10::IntArrayRef size,
@@ -294,7 +382,7 @@ at::Tensor custom_as_strided(
     c10::optional<int64_t> storage_offset_)
 {
   // copy implementation from build/aten/src/ATen/RegisterCPU.cpp wrapper_CPU__as_strided
-  std::cout << "Custom aten::as_strided called!" << std::endl;
+  std::cout << "Custom aten::as_strided() called!" << std::endl;
   return at::native::as_strided_tensorimpl(self, size, stride, storage_offset_);
 }
 
@@ -312,7 +400,7 @@ at::Tensor custom_as_strided(
 // or Ascend https://github.com/Ascend/pytorch/blob/e70b14dcbb0ebf362cf2985a59113ee2247df956/torch_npu/csrc/aten/VariableFallbackKernel.cpp#L49
 void custom_backend_fallback(const c10::OperatorHandle &op, torch::jit::Stack *stack)
 {
-  std::cout << "Custom backend_fallback() called!" << std::endl;
+  std::cout << "Custom backend_fallback() for " << op.operator_name() << " called!" << std::endl;
   at::native::cpu_fallback(op, stack);
 }
 
@@ -325,10 +413,13 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
 {
   m.impl("empty.memory_format", &custom_empty_memory_format);
   m.impl("empty_strided", &custom_empty_strided);
-  m.impl("as_strided", &custom_as_strided);
-  m.impl("_copy_from", &custom__copy_from);
-  // _copy_from_and_resize CPU kernel is not implemented
+
   m.impl("_copy_from_and_resize", &custom__copy_from_and_resize);
+  m.impl("_copy_from", &custom__copy_from);
+
+  m.impl("_reshape_alias", &custom__reshape_alias);
+  m.impl("view", &custom_view);
+  m.impl("as_strided", &custom_as_strided);
 }
 
 // Make `furiosa` namespace and register two custom operators

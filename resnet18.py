@@ -2,13 +2,9 @@ import torch
 import torchvision
 import torch.utils.cpp_extension
 import torch._dynamo.config
-import logging
-import furiosa_torch_impl
+import torch.utils.data
 
-
-torch._dynamo.config.log_level = logging.INFO
-torch._dynamo.config.output_code = True
-torch._dynamo.config.set_loggers_level(10)
+# import furiosa_torch_impl
 
 npu_module = torch.utils.cpp_extension.load(
     name="custom_device_extension",
@@ -48,44 +44,28 @@ def custom_convolution_overrideable(
     ).to(origin_device)
 
 
-# schema: at::Tensor view(const at::Tensor& self, c10::IntArrayRef size)
-def custom_view(self, size):
-    print("Custom aten::view called!")
-    if self.device == torch.device("meta"):
-        # for tracing
-        output = torch.randn(size).to(self.device)
-    else:
-        # for execution
-        # The reason of using as_strided is that as_strided return a tensor which has same storage with input
-        # It makes output tensor can pass the assertion in ADInplaceOrView::view operator which check output tensor has same storage with input tensor
-        # That assertion is at torch/csrc/autograd/generated/VariableType_3.cpp::15467, "AT_ASSERT(self__storage_saved.value().is_alias_of(result.storage()));"
-        stride = [1]
-        for s in reversed(size):
-            stride.insert(0, stride[0] * s)
-        output = self.as_strided(size, stride[1:])
-    return output
-
-
-# schema: at::Tensor _reshape_alias(const at::Tensor &self, c10::SymIntArrayRef size, c10::SymIntArrayRef stride)
-def custom__reshape_alias(self, size, stride):
-    print("Custom aten::_reshape_alias called!")
-    return self.as_strided(size, stride)
-
-
 lib = torch.library.Library("aten", "IMPL", "PrivateUse1")
 lib.impl("convolution_overrideable", custom_convolution_overrideable)
-lib.impl("view", custom_view)
-lib.impl("_reshape_alias", custom__reshape_alias)
 
 
-backend = furiosa_torch_impl.Warboy(num_calib=1)
+# backend = furiosa_torch_impl.Warboy(num_calib=1)
+def backend(gm, inputs):
+    from torch.fx.experimental.proxy_tensor import make_fx
 
-m = torchvision.models.resnet18().to("npu")
-x = torch.randn(1, 3, 244, 244).to("npu:0")
+    gm = make_fx(gm, tracing_mode="fake", _allow_non_fake_inputs=True)(*inputs)
+    return gm
+
+
+x = torch.randn(1, 3, 244, 244)
+m = torchvision.models.resnet18(pretrained=True)
 m.eval()
+
+y_ref = m(x)
+
+x = x.to("npu")
+m = m.to("npu")
 m = torch.compile(m, backend=backend)
 
 y = m(x)
-y = m(x)
-print(y.shape)
-print("finish")
+
+assert all(y_ref[0][i].item() == y[0][i].item() for i in range(1000))
