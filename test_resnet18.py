@@ -3,6 +3,7 @@ import torchvision
 import torch.utils.cpp_extension
 import torch._dynamo.config
 import torch.utils.data
+from torch._dynamo.backends.common import aot_autograd
 
 # import furiosa_torch_impl
 
@@ -56,16 +57,22 @@ def backend(gm, inputs):
     return gm
 
 
+# backend = aot_autograd(fw_compiler=backend)
+
 x = torch.randn(1, 3, 244, 244)
 m = torchvision.models.resnet18(pretrained=True)
 m.eval()
 
 y_ref = m(x)
+print("all done in cpu")
 
-x = x.to("npu")
-m = m.to("npu")
-m = torch.compile(m, backend=backend)
 
+# x = x.to("npu")
+# m = m.to("npu")
+print("load model to npu")
+
+m = torch.compile(m, backend=backend, dynamic=False)
+
+print("start execution")
 y = m(x)
-
 assert all(y_ref[0][i].item() == y[0][i].item() for i in range(1000))

@@ -280,12 +280,13 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
   // Have to set storage_offset properly for indexing tensor
   // TODO: change to use tensor.set_ by implementing set_.source_Storage_storage_offset
   auto *dst_ = dst.unsafeGetTensorImpl();
-  dst_->set_sizes_and_strides(self.sizes(), self.strides(), c10::make_optional(self.storage_offset()));
+  dst_->set_sizes_and_strides(dst.sizes(), dst.strides(), c10::make_optional(self.storage_offset()));
 
   // Type conversion
   if (self.scalar_type() != dst.scalar_type())
   {
     std::cout << "\tExecute custom type conversion" << std::endl;
+    std::cout << "\t" << self.sizes() << " * " << self.scalar_type() << " [" << self.storage().nbytes() << "] -> " << dst.sizes() << " * " << dst.scalar_type() << " [" << dst.storage().nbytes() << "]" << std::endl;
     // refer https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/cpu/CopyKernel.cpp#L244
     auto iter = at::TensorIteratorConfig()
                     .add_output(dst)
@@ -297,12 +298,13 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
 
     AT_DISPATCH_ALL_TYPES(self.scalar_type(), "_copy_from", [&]
                           {
-      using dest_t = scalar_t;
+      using src_t = scalar_t;
       AT_DISPATCH_ALL_TYPES(dst.scalar_type(), "_copy_from", [&] {
+        using dst_t = scalar_t;
         iter.for_each(
                       [](char** data, const int64_t* strides, int64_t size) {
-                        auto src = reinterpret_cast<const scalar_t*>(data[1]);
-                        auto dst = reinterpret_cast<dest_t*>(data[0]);
+                        auto src = reinterpret_cast<const src_t*>(data[1]);
+                        auto dst = reinterpret_cast<dst_t*>(data[0]);
                         at::vec::convert(src, dst, size);
                       });
       }); });
@@ -312,19 +314,25 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
   // cpu -> npu
   if (self.is_cpu() && dst.device().type() == c10::DeviceType::PrivateUse1)
   {
+    std::cout << "\tmemcpy from cpu to npu" << std::endl;
     std::memcpy(dst.storage().data_ptr().get(), self.storage().data_ptr().get(), self.storage().nbytes());
   }
   // npu -> cpu
   else if (self.device().type() == c10::DeviceType::PrivateUse1 && dst.is_cpu())
   {
+    std::cout << "\tcopy only data_ptr" << std::endl;
     at::DataPtr data_ptr = {self.storage().data_ptr().get(), self.storage().data_ptr().get_context(), nullptr, dst.device()};
     dst.storage().set_data_ptr_noswap(std::move(data_ptr));
   }
-  // TODO: handle copy from npu to npu (?)
-  // npu:0 -> npu:0
-  // else if (self.device() == dst.device()) {}
-  // npu:0 -> npu:1
-  // else {}
+  // npu -> npu
+  else if (self.device() == dst.device())
+  {
+    std::cout << "\tmemcpy from npu to npu" << std::endl;
+    if (self.storage().data_ptr().get() != dst.storage().data_ptr().get())
+    {
+      std::memcpy(dst.storage().data_ptr().get(), self.storage().data_ptr().get(), self.storage().nbytes());
+    }
+  }
 
   // Failed at assertion `result.storage().use_count() == 1`
   // auto p = const_cast<at::Tensor *>(&dst);
@@ -335,7 +343,7 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
 
 at::Tensor custom__copy_from_and_resize(const at::Tensor &self, const at::Tensor &dst)
 {
-  std::cout << "Custom aten::_copy_from_and_resize() called!" << std::endl;
+  std::cout << "Custom aten::_copy_from_and_resize() called! " << self.storage().data_ptr().get() << "[" << self.device() << "] -> " << dst.storage().data_ptr().get() << "[" << dst.device() << "] " << std::endl;
   // The reason of handling this case here is because this case usually occurs in cpu_fallback,
   // and _copy_from_and_resize function is called only in cpu_fallback.
   if (self.storage().data_ptr().get() == dst.storage().data_ptr().get())
@@ -352,6 +360,7 @@ at::Tensor custom__copy_from_and_resize(const at::Tensor &self, const at::Tensor
     std::cout << "\tRealloc dst storage " << dst.sizes() << " to " << self.sizes() << " and before copy" << std::endl;
     at::DataPtr data_ptr = dst.storage().allocator()->allocate(self.storage().nbytes());
     dst.storage().set_data_ptr_noswap(std::move(data_ptr));
+    dst.storage().set_nbytes(self.storage().nbytes());
     // TODO: change to use tensor.set_ by implementing set_.source_Storage_storage_offset
     auto *dst_ = dst.unsafeGetTensorImpl();
     dst_->set_sizes_and_strides(self.sizes(), self.strides(), c10::make_optional(self.storage_offset()));
@@ -363,7 +372,7 @@ at::Tensor custom__copy_from_and_resize(const at::Tensor &self, const at::Tensor
 // TODO: take only requried semenatics from at::native functions
 at::Tensor custom_view(const at::Tensor &self, c10::IntArrayRef size)
 {
-  std::cout << "Custom aten::vew() called!" << std::endl;
+  std::cout << "Custom aten::view() called!" << std::endl;
   return at::native::view(self, size);
 }
 
@@ -386,6 +395,42 @@ at::Tensor custom_as_strided(
   return at::native::as_strided_tensorimpl(self, size, stride, storage_offset_);
 }
 
+// TODO: take only requried semenatics from at::native functions
+at::Tensor &custom_set__source_Storage(at::Tensor &result, c10::Storage src)
+{
+  std::cout << "Custom aten::set_.source_Storage() called!" << std::endl;
+  int64_t new_size = static_cast<int64_t>(src.nbytes() / result.dtype().itemsize());
+  c10::IntArrayRef stride = {};
+  at::native::set_storage_cpu_(result, src, 0, new_size, stride);
+  return result;
+}
+
+// TODO: take only requried semenatics from at::native functions
+at::Tensor &custom_set__source_Storage_storage_offset(at::Tensor &result,
+                                                      c10::Storage storage,
+                                                      int64_t storage_offset,
+                                                      c10::IntArrayRef size,
+                                                      c10::IntArrayRef stride)
+{
+  std::cout << "Custom aten::set_.source_Sorage_storage_offset() called!" << std::endl;
+  at::native::set_storage_cpu_(result, storage, storage_offset, size, stride);
+  return result;
+}
+
+// not used yet
+at::Tensor custom_index_Tensor_out(const at::Tensor &self, const c10::List<c10::optional<at::Tensor>> &indices, at::Tensor &out)
+{
+  std::cout << "Custom aten::index.Tensor_out() called!" << std::endl;
+  return out;
+}
+
+// not used yet
+const at::Tensor &custom_resize_(const at::Tensor &self, at::IntArrayRef size,
+                                 c10::optional<at::MemoryFormat> optional_memory_format)
+{
+  std::cout << "Custom aten::resize_() called!" << std::endl;
+  return at::native::resize_(self, size, optional_memory_format);
+}
 // This macro does the heavy lifting.
 // With TORCH_LIBRARY_IMPL, you can register custom kernels for your backend.
 // For open registration, we're registering all of our kernels to the PrivateUse1 dispatch key.
@@ -413,6 +458,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
 {
   m.impl("empty.memory_format", &custom_empty_memory_format);
   m.impl("empty_strided", &custom_empty_strided);
+  // m.imp("fill_.Scalar", &custom_fill__Scalar);
 
   m.impl("_copy_from_and_resize", &custom__copy_from_and_resize);
   m.impl("_copy_from", &custom__copy_from);
@@ -420,6 +466,14 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
   m.impl("_reshape_alias", &custom__reshape_alias);
   m.impl("view", &custom_view);
   m.impl("as_strided", &custom_as_strided);
+  // m.impl("index.Tensor_out", &custom_index_Tensor_out);
+
+  m.impl("set_.source_Storage", &custom_set__source_Storage);
+  m.impl("set_.source_Storage_storage_offset", &custom_set__source_Storage_storage_offset);
+
+  // m.impl("_pin_memory", &custom__pin_memory);
+  // m.impl("is_pinned", &custom_is_pinned);
+  // m.impl("resize_", &custom_resize_);
 }
 
 // Make `furiosa` namespace and register two custom operators
