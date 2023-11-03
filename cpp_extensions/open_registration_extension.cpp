@@ -264,6 +264,13 @@ at::Tensor custom_empty_strided(at::IntArrayRef size, at::IntArrayRef stride, c1
 // basic dummy copy_() function, so we can copy from the custom device to/from CPU
 at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool non_blocking)
 {
+  // TODO: Fix semnatic of copy.
+  // Src memory address is not the start of self, and dst memory address is also not the start of dst
+  // src_memory_address = self.storage().data_ptr().get() + (self.itemsize() * self.storage_offset())
+  // dst_memory_address = dst.storage().data_ptr().get() + (dst.itemsize() * dst.storage_offset())
+  // n = calculate by size, stride, itemsize
+  // memcpy(dst_memory_address, src_memory_address, n);
+
   // TODO: handle Meta tensor for tracing
   const at::OptionalDeviceGuard device_guard(at::device_of(self));
   std::cout << "Custom aten::_copy_from() called! " << self.storage().data_ptr().get() << "[" << self.device() << "] -> " << dst.storage().data_ptr().get() << "[" << dst.device() << "] " << std::endl;
@@ -327,7 +334,7 @@ at::Tensor custom__copy_from(const at::Tensor &self, const at::Tensor &dst, bool
   // npu -> npu
   else if (self.device() == dst.device())
   {
-    std::cout << "\tmemcpy from npu to npu" << std::endl;
+    std::cout << "\tmemcpy from npu to npu " << self.storage().nbytes() << ", " << dst.storage().nbytes() << std::endl;
     if (self.storage().data_ptr().get() != dst.storage().data_ptr().get())
     {
       std::memcpy(dst.storage().data_ptr().get(), self.storage().data_ptr().get(), self.storage().nbytes());
